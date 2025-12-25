@@ -1,73 +1,160 @@
-import os
-from gigachat import GigaChat
-import json
+from chains.budget_chain import BudgetChain
+import logging
+from typing import Dict, List, Optional
 
-class BudgetChain:
+logger = logging.getLogger(__name__)
+
+class FinanceAgent:
+    """
+    Finance Agent - calculates budgets using GigaChat with budget constraints
+    """
+    
     def __init__(self):
-        auth_key = os.getenv("GIGACHAT_AUTH_KEY")
-        scope = os.getenv("GIGACHAT_SCOPE", "GIGACHAT_API_PERS")
-
-        if not auth_key:
-            raise RuntimeError("GIGACHAT_AUTH_KEY не задан в переменных окружения")
-
-        self.client = GigaChat(
-            credentials=auth_key,
-            scope=scope,
-            verify_ssl_certs=False,
-        )
-
+        self.chain = BudgetChain()
+        logger.info("Finance Agent initialized")
+    
     async def calculate_budget(self, event_data: dict) -> dict:
-        event_name = event_data.get("event_name", "Event")
-        guests = event_data.get("guests", 0)
-        total_budget = event_data.get("budget_total", 0)
+        """
+        Calculate event budget with budget constraints
+        
+        Args:
+            event_data: Dictionary containing event information including:
+                - event_name: str
+                - total_budget: float (общий бюджет, который нельзя превышать)
+                - event_type: str
+                - participant_count: int
+                - duration_hours: int
+                - venue_type: str
+                - date: str
+                - priority_categories: List[str] (приоритетные категории расходов)
+                - budget_constraints: Dict[str, float] (ограничения по категориям)
+                
+        Returns:
+            dict: Budget with detailed categories, total, analysis, and recommendations
+                Structure:
+                - categories: List[Dict] - детальные категории расходов
+                - total_cost: float - общая стоимость
+                - budget_status: str - статус бюджета (в рамках/превышен)
+                - analysis: str - анализ бюджета
+                - recommendations: List[str] - рекомендации по оптимизации
+                - category_details: Dict[str, Dict] - детальная информация по категориям
+        """
+        try:
+            logger.info(f"Finance Agent: Calculating budget for {event_data.get('event_name')}")
+            
+            # Проверяем наличие общего бюджета
+            total_budget = event_data.get('total_budget')
+            if total_budget is None:
+                logger.warning("Total budget not specified, calculations may exceed reasonable limits")
+            
+            # Добавляем информацию о приоритетах и ограничениях
+            enhanced_event_data = event_data.copy()
+            
+            # Если есть ограничения по бюджету, добавляем их в запрос
+            if 'budget_constraints' not in enhanced_event_data:
+                enhanced_event_data['budget_constraints'] = {}
+            
+            # Добавляем общий бюджет в constraints
+            if total_budget:
+                enhanced_event_data['budget_constraints']['total'] = total_budget
+            
+            result = await self.chain.calculate_budget(enhanced_event_data)
+            
+            # Проверяем, не превышен ли бюджет
+            if total_budget and 'total_cost' in result:
+                total_cost = result['total_cost']
+                if total_cost > total_budget:
+                    result['budget_status'] = 'exceeded'
+                    overspend = total_cost - total_budget
+                    
+                    # Добавляем рекомендации по сокращению расходов
+                    if 'recommendations' not in result:
+                        result['recommendations'] = []
+                    result['recommendations'].append(
+                        f"⚠️ Бюджет превышен на {overspend:.2f} руб. Рекомендуется сократить расходы."
+                    )
+                    
+                    # Детализируем категории для оптимизации
+                    if 'category_details' in result:
+                        # Сортируем категории по убыванию стоимости для выявления самых затратных
+                        sorted_categories = sorted(
+                            result['category_details'].items(),
+                            key=lambda x: x[1].get('amount', 0),
+                            reverse=True
+                        )
+                        
+                        top_categories = [cat[0] for cat in sorted_categories[:3]]
+                        if top_categories:
+                            result['recommendations'].append(
+                                f"Наибольшие расходы в категориях: {', '.join(top_categories)}. "
+                                f"Рассмотрите возможность оптимизации этих статей расходов."
+                            )
+                else:
+                    result['budget_status'] = 'within_budget'
+                    remaining = total_budget - total_cost
+                    result['recommendations'].append(
+                        f"✅ Бюджет в пределах лимита. Остаток: {remaining:.2f} руб."
+                    )
+            
+            # Обеспечиваем детализацию категорий
+            if 'categories' in result and isinstance(result['categories'], list):
+                detailed_categories = []
+                for i, category in enumerate(result['categories']):
+                    if isinstance(category, dict):
+                        # Дополняем информацию о категории
+                        detailed_category = {
+                            'id': i + 1,
+                            'name': category.get('name', f'Категория {i+1}'),
+                            'description': category.get('description', ''),
+                            'amount': category.get('amount', 0),
+                            'percentage': category.get('percentage', 0),
+                            'subcategories': category.get('subcategories', []),
+                            'priority': category.get('priority', 'medium'),
+                            'notes': category.get('notes', ''),
+                            'is_flexible': category.get('is_flexible', True)
+                        }
+                        detailed_categories.append(detailed_category)
+                
+                result['detailed_categories'] = detailed_categories
+                
+                # Добавляем детальную сводку по категориям
+                if 'analysis' not in result:
+                    result['analysis'] = ''
+                
+                category_summary = "\nДетализация расходов по категориям:\n"
+                for cat in detailed_categories:
+                    category_summary += (
+                        f"{cat['id']}. {cat['name']}: {cat['amount']:.2f} руб. "
+                        f"({cat['percentage']:.1f}% бюджета)\n"
+                    )
+                    if cat.get('subcategories'):
+                        for sub in cat['subcategories']:
+                            if isinstance(sub, dict):
+                                category_summary += f"   - {sub.get('name')}: {sub.get('amount', 0):.2f} руб.\n"
+                
+                result['analysis'] += category_summary
+            
+            logger.info(f"Finance Agent: Budget calculated successfully. "
+                       f"Status: {result.get('budget_status', 'unknown')}")
+            
+            # Добавляем временные метки для отслеживания
+            result['calculation_timestamp'] = datetime.datetime.now().isoformat()
+            result['budget_version'] = '1.0'
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"Finance Agent error: {e}", exc_info=True)
+            # Возвращаем структурированную ошибку
+            return {
+                'error': str(e),
+                'categories': [],
+                'total_cost': 0,
+                'budget_status': 'error',
+                'analysis': 'Произошла ошибка при расчете бюджета',
+                'recommendations': ['Обратитесь к администратору системы'],
+                'detailed_categories': []
+            }
 
-        prompt = f"""
-Ты финансовый аналитик для организации мероприятий.
-У тебя есть данные о событии:
-
-- Название: {event_name}
-- Количество гостей: {guests}
-- Общий бюджет (в рублях): {total_budget}
-- Доп. данные: {json.dumps(event_data, ensure_ascii=False)}
-
-Распредели бюджет по основным категориям:
-- venue (площадка)
-- catering (еда и напитки)
-- entertainment (развлекательная программа)
-- other (прочие расходы)
-
-Требования к ответу:
-- строго верни JSON без пояснительного текста;
-- сумма по всем категориям НЕ должна превышать общий бюджет;
-- структура ответа:
-
-{{
-  "event_name": "...",
-  "total_budget": число,
-  "guests": число,
-  "items": [
-    {{
-      "category": "venue",
-      "amount": число,
-      "description": "краткое описание"
-    }},
-    ...
-  ],
-  "analysis": "краткий анализ распределения бюджета",
-  "recommendations": [
-    "рекомендация 1",
-    "рекомендация 2"
-  ]
-}}
-"""
-
-        response = self.client.chat(prompt)
-        raw_content = response.choices[0].message.content
-
-        cleaned = raw_content.strip()
-        if cleaned.startswith("```
-            cleaned = cleaned.strip("`")
-            cleaned = cleaned.replace("json", "", 1).strip()
-
-        data = json.loads(cleaned)
-        return data
+# Добавляем импорт datetime для временных меток
+import datetime
