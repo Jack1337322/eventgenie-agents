@@ -70,6 +70,8 @@ class PlanningChain:
     
     async def generate_plan(self, event_data: dict) -> dict:
         """Generate event plan using GigaChat"""
+        import json  # Import at function start to avoid scope issues
+        
         try:
             logger.info(f"Generating plan for event: {event_data.get('event_name')}")
             
@@ -91,7 +93,6 @@ class PlanningChain:
             logger.info("Event plan generated successfully")
             
             # Parse JSON response
-            import json
             response_text = result.get("text", "")
             
             # Clean JSON response (remove markdown code blocks if present)
@@ -103,7 +104,20 @@ class PlanningChain:
             return json.loads(response_text)
             
         except Exception as e:
-            logger.error(f"Error generating plan: {e}")
+            error_msg = str(e)
+            logger.error(f"Error generating plan: {e}", exc_info=True)
+            
+            # Check for 403 Forbidden error
+            if "403" in error_msg or "Forbidden" in error_msg or "unauthorized" in error_msg.lower():
+                logger.error("GigaChat API returned 403 Forbidden. Possible causes:")
+                logger.error("1. Invalid GIGACHAT_CLIENT_ID or GIGACHAT_CLIENT_SECRET")
+                logger.error("2. Incorrect scope (should be GIGACHAT_API_PERS)")
+                logger.error("3. Token expired or invalid")
+                raise RuntimeError(
+                    "GigaChat API authentication failed (403 Forbidden). "
+                    "Please check your GIGACHAT_CLIENT_ID and GIGACHAT_CLIENT_SECRET credentials."
+                )
+            
             # Return fallback plan
             return self._fallback_plan(event_data)
     
